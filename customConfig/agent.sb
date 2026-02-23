@@ -1,0 +1,201 @@
+(version 1)
+
+;; ---------------------------------------------------------------------------
+;; Usage
+;; ---------------------------------------------------------------------------
+;; Required: pass HOME_DIR so user-specific rules stay username-agnostic.
+;;   sandbox-exec -D HOME_DIR="$HOME" -f "$HOME/agents.sb" "$HOME/.local/bin/claude"
+;;   sandbox-exec -D HOME_DIR="$HOME" -f "$HOME/agents.sb" /bin/zsh -lc 'echo ok'
+;; ~/.zshrc alias example:
+;;   alias claude='sandbox-exec -D HOME_DIR="$HOME" -f "$HOME/agents.sb" "$HOME/.local/bin/claude" --dangerously-skip-permissions'
+;;   WARNING: --dangerously-skip-permissions bypasses Claude's built-in guardrails; rely on this sandbox profile for safety.
+;;
+;; RISK MODEL: minimize write blast radius so Claude cannot modify unauthorized
+;; paths and accidentally damage system/user state. Broad "/" read is kept only
+;; for startup reliability; targeted deny rules below protect sensitive folders.
+;; We intentionally do NOT block every noisy operation; this is a practical
+;; safety profile focused on preventing destructive writes ("blowing up" system state).
+;; This is NOT a data-exfiltration prevention profile: broad reads and network
+;; access are allowed, so treat it as machine-safety, not secrecy-safety.
+;; Reference implementations:
+;;   https://github.com/anthropic-experimental/sandbox-runtime/blob/4fad8fa35db3f09958db1df401b30bd00402b611/src/sandbox/macos-sandbox-utils.ts
+;;   https://github.com/anthropic-experimental/sandbox-runtime/blob/4fad8fa35db3f09958db1df401b30bd00402b611/src/sandbox/sandbox-utils.ts
+
+;; Debugging sandbox denials quick reference:
+;; NOTE: use /usr/bin/log (some shells define a conflicting "log" builtin/function).
+;;   Live all denies:
+;;     /usr/bin/log stream --style compact --predicate 'eventMessage CONTAINS "Sandbox:" AND eventMessage CONTAINS "deny("'
+;;   Live denies for Claude only (replace version/PID fragment as needed):
+;;     /usr/bin/log stream --style compact --predicate 'eventMessage CONTAINS "Sandbox: 2.1.34(" AND eventMessage CONTAINS "deny("'
+;;   Recent sandboxd decisions:
+;;     /usr/bin/log show --last 10m --style compact --predicate 'process == "sandboxd"'
+;;   Recent kernel sandbox denials:
+;;     /usr/bin/log show --last 10m --style compact --predicate 'process == "kernel" AND eventMessage CONTAINS "(Sandbox)"'
+;;   Actionable-only stream (filters common noise):
+;;     /usr/bin/log stream --style compact --predicate 'eventMessage CONTAINS "Sandbox:" AND eventMessage CONTAINS "deny(" AND NOT eventMessage CONTAINS "duplicate report" AND NOT eventMessage CONTAINS "/dev/dtracehelper" AND NOT eventMessage CONTAINS "apple.shm.notification_center" AND NOT eventMessage CONTAINS "com.apple.diagnosticd" AND NOT eventMessage CONTAINS "com.apple.analyticsd"'
+;;   Correlate with file activity for one pid:
+;;     sudo fs_usage -w -f filesystem <pid> | grep -iE "open|create|write|rename"
+;;   Usually actionable deny ops: file-read-data, file-write-create, process-exec, mach-lookup.
+
+;; User path parameterization
+(define HOME_DIR (param "HOME_DIR"))                                       ; absolute home dir passed via -D HOME_DIR=...
+(define DATA_HOME_DIR (string-append "/System/Volumes/Data" HOME_DIR))     ; data-volume alias for HOME_DIR
+(define (home-subpath rel) (subpath (string-append HOME_DIR rel)))
+(define (home-literal rel) (literal (string-append HOME_DIR rel)))
+(define (data-home-subpath rel) (subpath (string-append DATA_HOME_DIR rel)))
+
+;; ---------------------------------------------------------------------------
+;; Section 1: Generic macOS baseline (all users)
+;; ---------------------------------------------------------------------------
+
+(deny default)
+
+;; Allow read-only access to the entire system.
+;; Trying to limit this to specific folders creates startup failures due to dyld/framework/cryptex across macOS versions.
+(allow file-read* (subpath "/"))                                         
+
+(allow network*)
+;; Network alternatives (disabled by default):
+;; Current profile keeps full network because Claude may start local dev servers
+;; that must bind ports and accept inbound connections during testing.
+;;
+;; API-only client mode (no inbound listeners):
+;;   (allow network-outbound)
+;;
+;; Localhost server dev mode (allow inbound/bind only on loopback):
+;;   (allow network-outbound)
+;;   (allow network-bind (local ip "localhost:*"))
+;;   (allow network-inbound (local ip "localhost:*"))
+;;
+;; Strictest practical mode (breaks local server testing):
+;;   (allow network-outbound)
+;;   (deny network-bind)
+;;   (deny network-inbound)
+(allow process-exec)
+(allow process-fork)
+(allow sysctl-read)
+(allow process-info-pidinfo)
+(allow process-info-setcontrol)
+(allow process-info* (target same-sandbox))                                ; child/parent tooling needs process inspection within sandbox descendants
+(allow signal (target same-sandbox))                                       ; allows parent tools to terminate hung child processes
+(allow mach-priv-task-port (target same-sandbox))                          ; enables same-sandbox task control used by some runtimes
+(allow pseudo-tty)
+
+(allow file-read* file-write* file-ioctl
+    (subpath "/tmp")
+    (subpath "/private/tmp")
+    (subpath "/var/folders")                                               ; Darwin per-user temp/cache root
+    (subpath "/private/var/folders")                                       ; realpath variant of /var/folders
+    (literal "/dev/stdout")
+    (literal "/dev/stderr")
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/tty")                                                   ; interactive terminal io
+    (literal "/dev/ptmx")                                                  ; pseudo-tty master allocation
+    (literal "/dev/urandom")
+    (literal "/dev/random")
+    (regex #"^/dev/tty")                                                   ; dynamic tty nodes created per shell session
+    (regex #"^/dev/ttys")                                                  ; modern macOS pty slave nodes
+    (regex #"^/dev/pty")                                                   ; legacy/dynamic pty node patterns
+)
+
+(allow file-write*
+    (subpath "/private/var/db/mds")                                        ; security/trust stack metadata updates
+)
+
+(allow mach-lookup
+    (global-name "com.apple.SecurityServer")                               ; keychain/security handshake broker
+    (global-name "com.apple.security.agent")                               ; auth helper path
+    (global-name "com.apple.securityd.xpc")                                ; securityd xpc endpoint
+    (global-name "com.apple.security.authhost")                            ; authentication host broker
+    (global-name "com.apple.secd")                                         ; keychain item operations
+    (global-name "com.apple.system.notification_center")                   ; libsystem notify initialization path
+    (global-name "com.apple.system.opendirectoryd.libinfo")                ; uid/user lookups during startup
+    (global-name "com.apple.logd")                                         ; os_log initialization
+    (global-name "com.apple.FSEvents")                                     ; file watcher backend
+    (global-name "com.apple.SystemConfiguration.configd")                  ; reachability/proxy queries
+    (global-name-regex #"^([A-Z0-9]+\.)?com\.1password\.")                 ; all 1Password services with optional team-id prefix
+    (global-name-regex #"^com\.agilebits\.")                               ; legacy 1Password service names
+    (global-name "com.apple.trustd.agent")                                 ; certificate trust evaluation agent
+    (global-name "com.apple.trustd")                                       ; certificate chain validation
+)
+
+;; ---------------------------------------------------------------------------
+;; Section 2: User-specific paths
+;; ---------------------------------------------------------------------------
+
+(allow file-write*
+    ;; Main directory with projects
+    (home-subpath "/server")                                               ; primary workspace write location
+
+    ;; Typical dev tooling paths
+    (home-subpath "/.local/share")                                         ; local tool installs and runtime assets
+    (home-subpath "/.cache")                                               ; shared cli caches
+    (home-subpath "/Library/Caches")                                       ; broad cache writes allowed; it is OK if agents wipe out caches
+    (home-subpath "/.npm")                                                 ; npm cache, _logs, and npx temp packages
+    (home-literal "/.npmrc")                                               ; npm per-user config writes
+    (home-subpath "/.node-gyp")                                            ; native addon headers/toolchain cache
+    (home-subpath "/Library/pnpm")                                         ; pnpm content-addressed store
+
+    ;; Agent/runtime/auth paths
+    (home-subpath "/.claude")                                              ; claude config/state directory
+    (home-literal "/.claude.json")                                         ; claude root settings file
+    (home-subpath "/.local/state/claude")                                  ; runtime lock files and local state
+    (home-subpath "/Library/Keychains")                                    ; required for keychain-backed auth token updates
+)
+
+(deny file-read*
+    (home-subpath "/.ssh")                                                 ; blocks private ssh keys and host mappings
+    (home-subpath "/.aws")                                                 ; blocks static aws credentials/config
+    (data-home-subpath "/.ssh")                                            ; same ssh block via data-volume alias
+    (data-home-subpath "/.aws")                                            ; same aws block via data-volume alias
+)
+
+(allow file-write* (subpath "/Users/abhishek/.pi/"))                       ; settings for pi-mono
+(allow file-write* (subpath "/Users/abhishek/pi/workspace/"))              ; workspace for pi-mono
+
+;; ---------------------------------------------------------------------------
+;; Optional Hardening Examples (disabled by default)
+;; ---------------------------------------------------------------------------
+;; (deny file-read*                                                       ; block GPG key material reads
+;;     (home-subpath "/.gnupg")
+;;     (data-home-subpath "/.gnupg")
+;; )
+;; (deny file-write* (home-subpath "/server/.git/hooks"))                 ; block git hook edits
+;; (deny file-write* (home-literal "/server/.git/config"))                ; block local git config edits
+;; (deny file-write* (home-subpath "/server/.claude/agents"))             ; protect local agent definitions
+;; (deny file-write* (home-subpath "/server/.claude/commands"))           ; protect local command definitions
+;; (deny file-write-unlink (home-subpath "/server/.git/hooks"))           ; prevent mv/rename bypass of hook protections
+;; (deny process-exec                                                      ; reduce high-risk command execution surface
+;;     (literal "/usr/bin/osascript")                                     ; blocks AppleScript automation attempts
+;;     (literal "/usr/bin/open")                                          ; blocks LaunchServices app/document launching
+;;     (literal "/usr/bin/security")                                      ; blocks direct keychain CLI operations
+;;     (literal "/usr/bin/crontab")                                       ; blocks user cron persistence
+;;     (literal "/usr/bin/defaults")                                      ; blocks writing app/system preferences
+;;     (literal "/usr/sbin/cron")                                         ; blocks direct cron daemon interactions
+;; )
+;; (deny file-read*                                                       ; stronger keychain secrecy, but may break Claude login/token refresh
+;;     (home-subpath "/Library/Keychains")
+;;     (data-home-subpath "/Library/Keychains")
+;; )
+;; (deny process-exec                                                     ; blocks write-then-exec from temp locations
+;;     (subpath "/tmp")
+;;     (subpath "/private/tmp")
+;;     (subpath "/var/folders")
+;;     (subpath "/private/var/folders")
+;; )
+;; Replace `(allow network*)` above with the next 3 lines for stricter network posture:
+;; (allow network-outbound)                                               ; keep outbound only
+;; (deny network-inbound)                                                 ; block listeners/accepted inbound sessions
+;; (deny network-bind)                                                    ; block opening local listening sockets
+;; (deny file-read* file-write*                                           ; block Docker daemon control socket escape path
+;;     (literal "/var/run/docker.sock")
+;;     (literal "/private/var/run/docker.sock")
+;;     (home-literal "/.docker/run/docker.sock")
+;; )
+;; Narrow broad writable paths if you can tolerate breakage:
+;;   - replace (home-subpath "/.cache") with (home-subpath "/.cache/claude")
+;;   - replace (home-subpath "/server") with PROJECT_DIR parameterization:
+;;       (define PROJECT_DIR (param "PROJECT_DIR"))
+;;       (allow file-write* (subpath PROJECT_DIR))
+;;       sandbox-exec -D HOME_DIR="$HOME" -D PROJECT_DIR="$(pwd)" -f "$HOME/agents.sb" "$HOME/.local/bin/claude"
