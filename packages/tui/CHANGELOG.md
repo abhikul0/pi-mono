@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-04-08
+
+## [0.65.2] - 2026-04-06
+
+### Fixed
+
+- Fixed render scheduling under heavy streaming output by coalescing `requestRender()` calls to a 16ms frame budget while preserving immediate `requestRender(true)` behavior.
+
+## [0.65.1] - 2026-04-05
+
+## [0.65.0] - 2026-04-03
+
+### Fixed
+
+- Fixed markdown H1 headings ending with inline code from leaking underline styling into trailing line padding
+- Fixed slash-command argument autocomplete to await async `getArgumentCompletions()` results and ignore invalid return values, preventing crashes when extension commands provide asynchronous completions ([#2719](https://github.com/badlogic/pi-mono/issues/2719))
+- Fixed non-capturing overlay padding from inflating scrollback and corrupting the viewport on terminal widen ([#2758](https://github.com/badlogic/pi-mono/pull/2758) by [@dotBeeps](https://github.com/dotBeeps))
+
+## [0.64.0] - 2026-03-29
+
+### Fixed
+
+- Fixed TUI cell size response handling to consume only exact `CSI 6 ; height ; width t` replies, so bare `Escape` is no longer swallowed while waiting for terminal image metadata ([#2661](https://github.com/badlogic/pi-mono/issues/2661))
+- Fixed Kitty keyboard protocol keypad functional keys to normalize to logical digits, symbols, and navigation keys, so numpad input in terminals such as iTerm2 no longer inserts Private Use Area gibberish or gets ignored ([#2650](https://github.com/badlogic/pi-mono/issues/2650))
+
+## [0.63.2] - 2026-03-29
+
+## [0.63.1] - 2026-03-27
+
+## [0.63.0] - 2026-03-27
+
+### Added
+
+- Added support for `PI_TUI_WRITE_LOG` directory paths, creating a unique log file (`tui-<timestamp>-<pid>.log`) per instance for easier debugging of multiple pi sessions ([#2508](https://github.com/badlogic/pi-mono/pull/2508) by [@mrexodia](https://github.com/mrexodia))
+
+### Fixed
+
+- Fixed blockquote text color breaking after inline links (and other inline elements) due to missing style restoration prefix
+- Fixed slash-command Tab completion from immediately chaining into argument autocomplete after completing the command name, restoring flows like `/model` that submit into a selector dialog ([#2577](https://github.com/badlogic/pi-mono/issues/2577))
+- Fixed stale content and incorrect viewport tracking after TUI content shrinks or transient components inflate the working area ([#2126](https://github.com/badlogic/pi-mono/pull/2126) by [@Perlence](https://github.com/Perlence))
+- Fixed `@` autocomplete to debounce editor-triggered searches, cancel in-flight `fd` lookups cleanly, and keep suggestions visible while results refresh ([#1278](https://github.com/badlogic/pi-mono/issues/1278))
+
+
+## [0.62.0] - 2026-03-23
+
+### Fixed
+
+- Fixed `truncateToWidth()` to stream truncation for very large strings, keep contiguous prefixes, and always terminate truncated SGR styling safely ([#2447](https://github.com/badlogic/pi-mono/issues/2447))
+- Fixed markdown heading styling being lost after inline code spans within headings
+
+## [0.61.1] - 2026-03-20
+
+### Fixed
+
+- Fixed shared keybinding resolution to stop user overrides from evicting unrelated default shortcuts such as selector confirm and editor cursor keys ([#2455](https://github.com/badlogic/pi-mono/issues/2455))
+- Fixed Termux software keyboard height changes from forcing full-screen redraws and replaying TUI history on every toggle ([#2467](https://github.com/badlogic/pi-mono/issues/2467))
+
+## [0.61.0] - 2026-03-20
+
+### Breaking Changes
+
+- Replaced the editor-only keybinding store with a single global keybindings manager in `@mariozechner/pi-tui`. TUI keybinding ids are now namespaced: `cursorUp` -> `tui.editor.cursorUp`, `cursorDown` -> `tui.editor.cursorDown`, `cursorLeft` -> `tui.editor.cursorLeft`, `cursorRight` -> `tui.editor.cursorRight`, `cursorWordLeft` -> `tui.editor.cursorWordLeft`, `cursorWordRight` -> `tui.editor.cursorWordRight`, `cursorLineStart` -> `tui.editor.cursorLineStart`, `cursorLineEnd` -> `tui.editor.cursorLineEnd`, `jumpForward` -> `tui.editor.jumpForward`, `jumpBackward` -> `tui.editor.jumpBackward`, `pageUp` -> `tui.editor.pageUp`, `pageDown` -> `tui.editor.pageDown`, `deleteCharBackward` -> `tui.editor.deleteCharBackward`, `deleteCharForward` -> `tui.editor.deleteCharForward`, `deleteWordBackward` -> `tui.editor.deleteWordBackward`, `deleteWordForward` -> `tui.editor.deleteWordForward`, `deleteToLineStart` -> `tui.editor.deleteToLineStart`, `deleteToLineEnd` -> `tui.editor.deleteToLineEnd`, `yank` -> `tui.editor.yank`, `yankPop` -> `tui.editor.yankPop`, `undo` -> `tui.editor.undo`, `newLine` -> `tui.input.newLine`, `submit` -> `tui.input.submit`, `tab` -> `tui.input.tab`, `copy` -> `tui.input.copy`, `selectUp` -> `tui.select.up`, `selectDown` -> `tui.select.down`, `selectPageUp` -> `tui.select.pageUp`, `selectPageDown` -> `tui.select.pageDown`, `selectConfirm` -> `tui.select.confirm`, `selectCancel` -> `tui.select.cancel`. `keybindings.json` stays backward compatible because each keybinding definition maps the new internal id back to the existing public config key. Apps extend `interface Keybindings` via declaration merging, create one manager with both TUI and app definitions, then install it with `setKeybindings(...)` ([#2391](https://github.com/badlogic/pi-mono/issues/2391))
+
+### Fixed
+
+- Fixed user-defined keybindings to shadow conflicting default bindings across the shared registry, so app-level defaults no longer stay active when the same key is explicitly reassigned ([#2391](https://github.com/badlogic/pi-mono/issues/2391))
+
 ## [0.60.0] - 2026-03-18
 
 ### Fixed

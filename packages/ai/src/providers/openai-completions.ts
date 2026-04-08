@@ -127,6 +127,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			for await (const chunk of openaiStream) {
+				if (!chunk || typeof chunk !== "object") continue;
+
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;
@@ -134,7 +136,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.usage = parseChunkUsage(chunk.usage, model);
 				}
 
-				const choice = chunk.choices?.[0];
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
@@ -393,6 +395,9 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 
 	if (context.tools) {
 		params.tools = convertTools(context.tools, compat);
+		if (compat.zaiToolStream) {
+			(params as any).tool_stream = true;
+		}
 	} else if (hasToolHistory(context.messages)) {
 		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
 		params.tools = [];
@@ -408,12 +413,16 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		(params as any).enable_thinking = !!options?.reasoningEffort;
 	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		(params as any).chat_template_kwargs = { enable_thinking: !!options?.reasoningEffort };
-	} else if (compat.thinkingFormat === "openrouter" && options?.reasoningEffort && model.reasoning) {
+	} else if (compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
-		openRouterParams.reasoning = {
-			effort: mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap),
-		};
+		if (options?.reasoningEffort) {
+			openRouterParams.reasoning = {
+				effort: mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap),
+			};
+		} else {
+			openRouterParams.reasoning = { effort: "none" };
+		}
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = mapReasoningEffort(options.reasoningEffort, compat.reasoningEffortMap);
@@ -725,24 +734,34 @@ function parseChunkUsage(
 	rawUsage: {
 		prompt_tokens?: number;
 		completion_tokens?: number;
-		prompt_tokens_details?: { cached_tokens?: number };
+		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 		completion_tokens_details?: { reasoning_tokens?: number };
 	},
 	model: Model<"openai-completions">,
 ): AssistantMessage["usage"] {
-	const cachedTokens = rawUsage.prompt_tokens_details?.cached_tokens || 0;
+	const promptTokens = rawUsage.prompt_tokens || 0;
+	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens || 0;
+	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;
 	const reasoningTokens = rawUsage.completion_tokens_details?.reasoning_tokens || 0;
-	// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
-	const input = (rawUsage.prompt_tokens || 0) - cachedTokens;
+
+	// Normalize to pi-ai semantics:
+	// - cacheRead: hits from cache created by previous requests only
+	// - cacheWrite: tokens written to cache in this request
+	// Some OpenAI-compatible providers (observed on OpenRouter) report cached_tokens
+	// as (previous hits + current writes). In that case, remove cacheWrite from cacheRead.
+	const cacheReadTokens =
+		cacheWriteTokens > 0 ? Math.max(0, reportedCachedTokens - cacheWriteTokens) : reportedCachedTokens;
+
+	const input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
 	// Compute totalTokens ourselves since we add reasoning_tokens to output
 	// and some providers (e.g., Groq) don't include them in total_tokens
 	const outputTokens = (rawUsage.completion_tokens || 0) + reasoningTokens;
 	const usage: AssistantMessage["usage"] = {
 		input,
 		output: outputTokens,
-		cacheRead: cachedTokens,
-		cacheWrite: 0,
-		totalTokens: input + outputTokens + cachedTokens,
+		cacheRead: cacheReadTokens,
+		cacheWrite: cacheWriteTokens,
+		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);
@@ -829,6 +848,7 @@ function detectCompat(model: Model<"openai-completions">): Required<OpenAIComple
 				: "openai",
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
+		zaiToolStream: false,
 		supportsStrictMode: true,
 	};
 }
@@ -855,6 +875,7 @@ function getCompat(model: Model<"openai-completions">): Required<OpenAICompletio
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
 		openRouterRouting: model.compat.openRouterRouting ?? {},
 		vercelGatewayRouting: model.compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
+		zaiToolStream: model.compat.zaiToolStream ?? detected.zaiToolStream,
 		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 	};
 }
